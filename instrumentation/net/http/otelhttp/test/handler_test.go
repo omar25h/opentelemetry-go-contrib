@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package test
 
@@ -23,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,12 +22,12 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
-	"go.opentelemetry.io/otel/sdk/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata/metricdatatest"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -50,7 +40,9 @@ func assertScopeMetrics(t *testing.T, sm metricdata.ScopeMetrics, attrs attribut
 	require.Len(t, sm.Metrics, 3)
 
 	want := metricdata.Metrics{
-		Name: "http.server.request_content_length",
+		Name:        "http.server.request.size",
+		Description: "Measures the size of HTTP request messages.",
+		Unit:        "By",
 		Data: metricdata.Sum[int64]{
 			DataPoints:  []metricdata.DataPoint[int64]{{Attributes: attrs, Value: 0}},
 			Temporality: metricdata.CumulativeTemporality,
@@ -60,7 +52,9 @@ func assertScopeMetrics(t *testing.T, sm metricdata.ScopeMetrics, attrs attribut
 	metricdatatest.AssertEqual(t, want, sm.Metrics[0], metricdatatest.IgnoreTimestamp())
 
 	want = metricdata.Metrics{
-		Name: "http.server.response_content_length",
+		Name:        "http.server.response.size",
+		Description: "Measures the size of HTTP response messages.",
+		Unit:        "By",
 		Data: metricdata.Sum[int64]{
 			DataPoints:  []metricdata.DataPoint[int64]{{Attributes: attrs, Value: 11}},
 			Temporality: metricdata.CumulativeTemporality,
@@ -69,27 +63,30 @@ func assertScopeMetrics(t *testing.T, sm metricdata.ScopeMetrics, attrs attribut
 	}
 	metricdatatest.AssertEqual(t, want, sm.Metrics[1], metricdatatest.IgnoreTimestamp())
 
-	// Duration value is not predictable.
-	dur := sm.Metrics[2]
-	assert.Equal(t, "http.server.duration", dur.Name)
-	require.IsType(t, dur.Data, metricdata.Histogram[float64]{})
-	hist := dur.Data.(metricdata.Histogram[float64])
-	assert.Equal(t, metricdata.CumulativeTemporality, hist.Temporality)
-	require.Len(t, hist.DataPoints, 1)
-	dPt := hist.DataPoints[0]
-	assert.Equal(t, attrs, dPt.Attributes, "attributes")
-	assert.Equal(t, uint64(1), dPt.Count, "count")
-	assert.Equal(t, []float64{0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000}, dPt.Bounds, "bounds")
+	want = metricdata.Metrics{
+		Name:        "http.server.duration",
+		Description: "Measures the duration of inbound HTTP requests.",
+		Unit:        "ms",
+		Data: metricdata.Histogram[float64]{
+			DataPoints:  []metricdata.HistogramDataPoint[float64]{{Attributes: attrs}},
+			Temporality: metricdata.CumulativeTemporality,
+		},
+	}
+	metricdatatest.AssertEqual(t, want, sm.Metrics[2], metricdatatest.IgnoreTimestamp(), metricdatatest.IgnoreValue())
+
+	// verify that the custom start time, which is 10 minutes in the past, is respected.
+	assert.GreaterOrEqual(t, sm.Metrics[2].Data.(metricdata.Histogram[float64]).DataPoints[0].Sum, float64(10*time.Minute/time.Millisecond))
 }
 
 func TestHandlerBasics(t *testing.T) {
+	t.Setenv("OTEL_METRICS_EXEMPLAR_FILTER", "always_off")
 	rr := httptest.NewRecorder()
 
 	spanRecorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder))
 
-	reader := metric.NewManualReader()
-	meterProvider := metric.NewMeterProvider(metric.WithReader(reader))
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
 	h := otelhttp.NewHandler(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +106,9 @@ func TestHandlerBasics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// set a custom start time 10 minutes in the past.
+	startTime := time.Now().Add(-10 * time.Minute)
+	r = r.WithContext(otelhttp.ContextWithStartTime(r.Context(), startTime))
 	h.ServeHTTP(rr, r)
 
 	rm := metricdata.ResourceMetrics{}
@@ -118,14 +118,15 @@ func TestHandlerBasics(t *testing.T) {
 	attrs := attribute.NewSet(
 		semconv.NetHostName(r.Host),
 		semconv.HTTPSchemeHTTP,
-		semconv.HTTPFlavorKey.String(fmt.Sprintf("1.%d", r.ProtoMinor)),
+		semconv.NetProtocolName("http"),
+		semconv.NetProtocolVersion(fmt.Sprintf("1.%d", r.ProtoMinor)),
 		semconv.HTTPMethod("GET"),
 		attribute.String("test", "attribute"),
 		semconv.HTTPStatusCode(200),
 	)
 	assertScopeMetrics(t, rm.ScopeMetrics[0], attrs)
 
-	if got, expected := rr.Result().StatusCode, http.StatusOK; got != expected {
+	if got, expected := rr.Result().StatusCode, http.StatusOK; got != expected { //nolint:bodyclose // False positive for httptest.ResponseRecorder: https://github.com/timakin/bodyclose/issues/59.
 		t.Fatalf("got %d, expected %d", got, expected)
 	}
 
@@ -137,13 +138,14 @@ func TestHandlerBasics(t *testing.T) {
 		t.Fatalf("invalid span created: %#v", spans[0].SpanContext())
 	}
 
-	d, err := io.ReadAll(rr.Result().Body)
+	d, err := io.ReadAll(rr.Result().Body) //nolint:bodyclose // False positive for httptest.ResponseRecorder: https://github.com/timakin/bodyclose/issues/59.
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, expected := string(d), "hello world"; got != expected {
 		t.Fatalf("got %q, expected %q", got, expected)
 	}
+	assert.Equal(t, startTime, spans[0].StartTime())
 }
 
 func TestHandlerEmittedAttributes(t *testing.T) {
@@ -222,6 +224,12 @@ func (rw *respWriteHeaderCounter) WriteHeader(statusCode int) {
 	rw.ResponseWriter.WriteHeader(statusCode)
 }
 
+func (rw *respWriteHeaderCounter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 func TestHandlerPropagateWriteHeaderCalls(t *testing.T) {
 	testCases := []struct {
 		name                 string
@@ -257,6 +265,38 @@ func TestHandlerPropagateWriteHeaderCalls(t *testing.T) {
 			},
 			expectHeadersWritten: []int{http.StatusInternalServerError, http.StatusOK},
 		},
+		{
+			name: "When writing the header indirectly through body write",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("hello"))
+			},
+			expectHeadersWritten: []int{http.StatusOK},
+		},
+		{
+			name: "With a header already written when writing the body",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte("hello"))
+			},
+			expectHeadersWritten: []int{http.StatusBadRequest},
+		},
+		{
+			name: "When writing the header indirectly through flush",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				f := w.(http.Flusher)
+				f.Flush()
+			},
+			expectHeadersWritten: []int{http.StatusOK},
+		},
+		{
+			name: "With a header already written when flushing",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				f := w.(http.Flusher)
+				f.Flush()
+			},
+			expectHeadersWritten: []int{http.StatusBadRequest},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -283,7 +323,7 @@ func TestHandlerRequestWithTraceContext(t *testing.T) {
 	h := otelhttp.NewHandler(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, err := w.Write([]byte("hello world"))
-			require.NoError(t, err)
+			assert.NoError(t, err)
 		}), "test_handler")
 
 	r, err := http.NewRequest(http.MethodGet, "http://localhost/", nil)
@@ -298,7 +338,7 @@ func TestHandlerRequestWithTraceContext(t *testing.T) {
 	r = r.WithContext(ctx)
 
 	h.ServeHTTP(rr, r)
-	assert.Equal(t, http.StatusOK, rr.Result().StatusCode)
+	assert.Equal(t, http.StatusOK, rr.Result().StatusCode) //nolint:bodyclose // False positive for httptest.ResponseRecorder: https://github.com/timakin/bodyclose/issues/59.
 
 	span.End()
 
@@ -346,7 +386,7 @@ func TestWithPublicEndpoint(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, r)
-	assert.Equal(t, http.StatusOK, rr.Result().StatusCode)
+	assert.Equal(t, http.StatusOK, rr.Result().StatusCode) //nolint:bodyclose // False positive for httptest.ResponseRecorder: https://github.com/timakin/bodyclose/issues/59.
 
 	// Recorded span should be linked with an incoming span context.
 	assert.NoError(t, spanRecorder.ForceFlush(ctx))
@@ -401,7 +441,7 @@ func TestWithPublicEndpointFn(t *testing.T) {
 			},
 			spansAssert: func(t *testing.T, _ trace.SpanContext, spans []sdktrace.ReadOnlySpan) {
 				require.Len(t, spans, 1)
-				require.Len(t, spans[0].Links(), 0, "should not contain link")
+				require.Empty(t, spans[0].Links(), "should not contain link")
 			},
 		},
 	} {
@@ -430,7 +470,7 @@ func TestWithPublicEndpointFn(t *testing.T) {
 
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, r)
-			assert.Equal(t, http.StatusOK, rr.Result().StatusCode)
+			assert.Equal(t, http.StatusOK, rr.Result().StatusCode) //nolint:bodyclose // False positive for httptest.ResponseRecorder: https://github.com/timakin/bodyclose/issues/59.
 
 			// Recorded span should be linked with an incoming span context.
 			assert.NoError(t, spanRecorder.ForceFlush(ctx))
@@ -464,20 +504,21 @@ func TestSpanStatus(t *testing.T) {
 			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
 
 			require.Len(t, sr.Ended(), 1, "should emit a span")
-			assert.Equal(t, sr.Ended()[0].Status().Code, tc.wantSpanStatus, "should only set Error status for HTTP statuses >= 500")
+			assert.Equal(t, tc.wantSpanStatus, sr.Ended()[0].Status().Code, "should only set Error status for HTTP statuses >= 500")
 		})
 	}
 }
 
 func TestWithRouteTag(t *testing.T) {
+	t.Setenv("OTEL_METRICS_EXEMPLAR_FILTER", "always_off")
 	route := "/some/route"
 
 	spanRecorder := tracetest.NewSpanRecorder()
 	tracerProvider := sdktrace.NewTracerProvider()
 	tracerProvider.RegisterSpanProcessor(spanRecorder)
 
-	metricReader := metric.NewManualReader()
-	meterProvider := metric.NewMeterProvider(metric.WithReader(metricReader))
+	metricReader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(metricReader))
 
 	h := otelhttp.NewHandler(
 		otelhttp.WithRouteTag(
@@ -533,5 +574,46 @@ func TestWithRouteTag(t *testing.T) {
 		default:
 			require.Fail(t, "metric has unexpected data type", "metric '%v' has unexpected data type %T", m.Name, m.Data)
 		}
+	}
+}
+
+func BenchmarkHandlerServeHTTP(b *testing.B) {
+	tp := sdktrace.NewTracerProvider()
+	mp := sdkmetric.NewMeterProvider()
+
+	r, err := http.NewRequest(http.MethodGet, "http://localhost/", nil)
+	require.NoError(b, err)
+
+	for _, bb := range []struct {
+		name    string
+		handler http.Handler
+	}{
+		{
+			name: "without the otelhttp handler",
+			handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, "Hello World")
+			}),
+		},
+		{
+			name: "with the otelhttp handler",
+			handler: otelhttp.NewHandler(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					fmt.Fprint(w, "Hello World")
+				}),
+				"test_handler",
+				otelhttp.WithTracerProvider(tp),
+				otelhttp.WithMeterProvider(mp),
+			),
+		},
+	} {
+		b.Run(bb.name, func(b *testing.B) {
+			rr := httptest.NewRecorder()
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				bb.handler.ServeHTTP(rr, r)
+			}
+		})
 	}
 }

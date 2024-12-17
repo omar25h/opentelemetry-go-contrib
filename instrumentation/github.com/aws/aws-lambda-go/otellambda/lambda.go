@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package otellambda // import "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
 
@@ -29,7 +18,8 @@ import (
 )
 
 const (
-	tracerName = "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
+	// ScopeName is the instrumentation scope name.
+	ScopeName = "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
 )
 
 var errorLogger = log.New(log.Writer(), "OTel Lambda Error: ", 0)
@@ -53,7 +43,7 @@ func newInstrumentor(opts ...Option) instrumentor {
 
 	return instrumentor{
 		configuration: cfg,
-		tracer:        cfg.TracerProvider.Tracer(tracerName, trace.WithInstrumentationVersion(Version())),
+		tracer:        cfg.TracerProvider.Tracer(ScopeName, trace.WithInstrumentationVersion(Version())),
 		resAttrs:      []attribute.KeyValue{},
 	}
 }

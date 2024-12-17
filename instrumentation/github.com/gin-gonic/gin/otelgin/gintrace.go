@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 // Based on https://github.com/DataDog/dd-trace-go/blob/8fb554ff7cf694267f9077ae35e27ce4689ed8b6/contrib/gin-gonic/gin/gintrace.go
 
@@ -26,13 +15,14 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
-	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 const (
-	tracerKey  = "otel-go-contrib-tracer"
-	tracerName = "go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
+	tracerKey = "otel-go-contrib-tracer"
+	// ScopeName is the instrumentation scope name.
+	ScopeName = "go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 )
 
 // Middleware returns middleware that will trace incoming requests.
@@ -47,7 +37,7 @@ func Middleware(service string, opts ...Option) gin.HandlerFunc {
 		cfg.TracerProvider = otel.GetTracerProvider()
 	}
 	tracer := cfg.TracerProvider.Tracer(
-		tracerName,
+		ScopeName,
 		oteltrace.WithInstrumentationVersion(Version()),
 	)
 	if cfg.Propagators == nil {
@@ -62,6 +52,14 @@ func Middleware(service string, opts ...Option) gin.HandlerFunc {
 				return
 			}
 		}
+		for _, f := range cfg.GinFilters {
+			if !f(c) {
+				// Serve the request to the next middleware
+				// if a filter rejects the request.
+				c.Next()
+				return
+			}
+		}
 		c.Set(tracerKey, tracer)
 		savedCtx := c.Request.Context()
 		defer func() {
@@ -70,6 +68,7 @@ func Middleware(service string, opts ...Option) gin.HandlerFunc {
 		ctx := cfg.Propagators.Extract(savedCtx, propagation.HeaderCarrier(c.Request.Header))
 		opts := []oteltrace.SpanStartOption{
 			oteltrace.WithAttributes(semconvutil.HTTPServerRequest(service, c.Request)...),
+			oteltrace.WithAttributes(semconv.HTTPRoute(c.FullPath())),
 			oteltrace.WithSpanKind(oteltrace.SpanKindServer),
 		}
 		var spanName string
@@ -80,9 +79,6 @@ func Middleware(service string, opts ...Option) gin.HandlerFunc {
 		}
 		if spanName == "" {
 			spanName = fmt.Sprintf("HTTP %s route not found", c.Request.Method)
-		} else {
-			rAttr := semconv.HTTPRoute(spanName)
-			opts = append(opts, oteltrace.WithAttributes(rAttr))
 		}
 		ctx, span := tracer.Start(ctx, spanName, opts...)
 		defer span.End()
@@ -99,7 +95,10 @@ func Middleware(service string, opts ...Option) gin.HandlerFunc {
 			span.SetAttributes(semconv.HTTPStatusCode(status))
 		}
 		if len(c.Errors) > 0 {
-			span.SetAttributes(attribute.String("gin.errors", c.Errors.String()))
+			span.SetStatus(codes.Error, c.Errors.String())
+			for _, err := range c.Errors {
+				span.RecordError(err.Err)
+			}
 		}
 	}
 }
@@ -116,7 +115,7 @@ func HTML(c *gin.Context, code int, name string, obj interface{}) {
 	}
 	if !ok {
 		tracer = otel.GetTracerProvider().Tracer(
-			tracerName,
+			ScopeName,
 			oteltrace.WithInstrumentationVersion(Version()),
 		)
 	}
@@ -126,16 +125,6 @@ func HTML(c *gin.Context, code int, name string, obj interface{}) {
 	}()
 	opt := oteltrace.WithAttributes(attribute.String("go.template", name))
 	_, span := tracer.Start(savedContext, "gin.renderer.html", opt)
-	defer func() {
-		if r := recover(); r != nil {
-			err := fmt.Errorf("error rendering template:%s: %s", name, r)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "template failure")
-			span.End()
-			panic(r)
-		} else {
-			span.End()
-		}
-	}()
+	defer span.End()
 	c.HTML(code, name, obj)
 }

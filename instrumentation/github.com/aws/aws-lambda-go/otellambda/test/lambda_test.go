@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package test
 
@@ -19,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -40,7 +28,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -98,13 +86,13 @@ func initMockTracerProvider() (*sdktrace.TracerProvider, *tracetest.InMemoryExpo
 	return tp, exp
 }
 
-func setEnvVars() {
-	_ = os.Setenv("AWS_LAMBDA_FUNCTION_NAME", "testFunction")
-	_ = os.Setenv("AWS_REGION", "us-texas-1")
-	_ = os.Setenv("AWS_LAMBDA_FUNCTION_VERSION", "$LATEST")
-	_ = os.Setenv("AWS_LAMBDA_LOG_STREAM_NAME", "2023/01/01/[$LATEST]5d1edb9e525d486696cf01a3503487bc")
-	_ = os.Setenv("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "128")
-	_ = os.Setenv("_X_AMZN_TRACE_ID", "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1")
+func setEnvVars(t *testing.T) {
+	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "testFunction")
+	t.Setenv("AWS_REGION", "us-texas-1")
+	t.Setenv("AWS_LAMBDA_FUNCTION_VERSION", "$LATEST")
+	t.Setenv("AWS_LAMBDA_LOG_STREAM_NAME", "2023/01/01/[$LATEST]5d1edb9e525d486696cf01a3503487bc")
+	t.Setenv("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "128")
+	t.Setenv("_X_AMZN_TRACE_ID", "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1")
 }
 
 // Vars for Tracing and TracingWithFlusher Tests.
@@ -155,7 +143,10 @@ var (
 			attribute.String("faas.version", "$LATEST"),
 			attribute.String("faas.instance", "2023/01/01/[$LATEST]5d1edb9e525d486696cf01a3503487bc"),
 			attribute.Int("faas.max_memory", 128)),
-		InstrumentationLibrary: instrumentation.Library{Name: "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda", Version: otellambda.Version()},
+		InstrumentationScope: instrumentation.Scope{
+			Name:    "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda",
+			Version: otellambda.Version(),
+		},
 	}
 )
 
@@ -173,11 +164,11 @@ func assertStubEqualsIgnoreTime(t *testing.T, expected tracetest.SpanStub, actua
 	assert.Equal(t, expected.DroppedLinks, actual.DroppedLinks)
 	assert.Equal(t, expected.ChildSpanCount, actual.ChildSpanCount)
 	assert.Equal(t, expected.Resource, actual.Resource)
-	assert.Equal(t, expected.InstrumentationLibrary, actual.InstrumentationLibrary)
+	assert.Equal(t, expected.InstrumentationScope, actual.InstrumentationScope)
 }
 
 func TestInstrumentHandlerTracing(t *testing.T) {
-	setEnvVars()
+	setEnvVars(t)
 	tp, memExporter := initMockTracerProvider()
 
 	customerHandler := func() (string, error) {
@@ -198,7 +189,7 @@ func TestInstrumentHandlerTracing(t *testing.T) {
 }
 
 func TestWrapHandlerTracing(t *testing.T) {
-	setEnvVars()
+	setEnvVars(t)
 	tp, memExporter := initMockTracerProvider()
 
 	// No flusher needed as SimpleSpanProcessor is synchronous
@@ -223,7 +214,7 @@ func (mf *mockFlusher) ForceFlush(context.Context) error {
 var _ otellambda.Flusher = &mockFlusher{}
 
 func TestInstrumentHandlerTracingWithFlusher(t *testing.T) {
-	setEnvVars()
+	setEnvVars(t)
 	tp, memExporter := initMockTracerProvider()
 
 	customerHandler := func() (string, error) {
@@ -246,7 +237,7 @@ func TestInstrumentHandlerTracingWithFlusher(t *testing.T) {
 }
 
 func TestWrapHandlerTracingWithFlusher(t *testing.T) {
-	setEnvVars()
+	setEnvVars(t)
 	tp, memExporter := initMockTracerProvider()
 
 	flusher := mockFlusher{}
@@ -347,7 +338,10 @@ var (
 			attribute.String("faas.version", "$LATEST"),
 			attribute.String("faas.instance", "2023/01/01/[$LATEST]5d1edb9e525d486696cf01a3503487bc"),
 			attribute.Int("faas.max_memory", 128)),
-		InstrumentationLibrary: instrumentation.Library{Name: "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda", Version: otellambda.Version()},
+		InstrumentationScope: instrumentation.Scope{
+			Name:    "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda",
+			Version: otellambda.Version(),
+		},
 	}
 )
 
@@ -362,7 +356,7 @@ func mockRequestCarrier(eventJSON []byte) propagation.TextMapCarrier {
 }
 
 func TestInstrumentHandlerTracingWithMockPropagator(t *testing.T) {
-	setEnvVars()
+	setEnvVars(t)
 	tp, memExporter := initMockTracerProvider()
 
 	customerHandler := func(event mockRequest) (string, error) {
@@ -387,7 +381,7 @@ func TestInstrumentHandlerTracingWithMockPropagator(t *testing.T) {
 }
 
 func TestWrapHandlerTracingWithMockPropagator(t *testing.T) {
-	setEnvVars()
+	setEnvVars(t)
 	tp, memExporter := initMockTracerProvider()
 
 	// No flusher needed as SimpleSpanProcessor is synchronous

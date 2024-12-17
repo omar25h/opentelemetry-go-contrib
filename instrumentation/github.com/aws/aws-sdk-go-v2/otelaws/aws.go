@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package otelaws // import "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
 
@@ -31,7 +20,8 @@ import (
 )
 
 const (
-	tracerName = "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+	// ScopeName is the instrumentation scope name.
+	ScopeName = "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
 )
 
 type spanTimestampKey struct{}
@@ -93,6 +83,23 @@ func (m otelMiddlewares) initializeMiddlewareAfter(stack *middleware.Stack) erro
 		middleware.After)
 }
 
+func (m otelMiddlewares) finalizeMiddlewareAfter(stack *middleware.Stack) error {
+	return stack.Finalize.Add(middleware.FinalizeMiddlewareFunc("OTelFinalizeMiddleware", func(
+		ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (
+		out middleware.FinalizeOutput, metadata middleware.Metadata, err error,
+	) {
+		// Propagate the Trace information by injecting it into the HTTP request.
+		switch req := in.Request.(type) {
+		case *smithyhttp.Request:
+			m.propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
+		default:
+		}
+
+		return next.HandleFinalize(ctx, in)
+	}),
+		middleware.After)
+}
+
 func (m otelMiddlewares) deserializeMiddleware(stack *middleware.Stack) error {
 	return stack.Deserialize.Add(middleware.DeserializeMiddlewareFunc("OTelDeserializeMiddleware", func(
 		ctx context.Context, in middleware.DeserializeInput, next middleware.DeserializeHandler) (
@@ -114,23 +121,6 @@ func (m otelMiddlewares) deserializeMiddleware(stack *middleware.Stack) error {
 		}
 
 		return out, metadata, err
-	}),
-		middleware.Before)
-}
-
-func (m otelMiddlewares) finalizeMiddleware(stack *middleware.Stack) error {
-	return stack.Finalize.Add(middleware.FinalizeMiddlewareFunc("OTelFinalizeMiddleware", func(
-		ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (
-		out middleware.FinalizeOutput, metadata middleware.Metadata, err error,
-	) {
-		// Propagate the Trace information by injecting it into the HTTP request.
-		switch req := in.Request.(type) {
-		case *smithyhttp.Request:
-			m.propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
-		default:
-		}
-
-		return next.HandleFinalize(ctx, in)
 	}),
 		middleware.Before)
 }
@@ -160,10 +150,10 @@ func AppendMiddlewares(apiOptions *[]func(*middleware.Stack) error, opts ...Opti
 	}
 
 	m := otelMiddlewares{
-		tracer: cfg.TracerProvider.Tracer(tracerName,
+		tracer: cfg.TracerProvider.Tracer(ScopeName,
 			trace.WithInstrumentationVersion(Version())),
 		propagator:      cfg.TextMapPropagator,
 		attributeSetter: cfg.AttributeSetter,
 	}
-	*apiOptions = append(*apiOptions, m.initializeMiddlewareBefore, m.initializeMiddlewareAfter, m.finalizeMiddleware, m.deserializeMiddleware)
+	*apiOptions = append(*apiOptions, m.initializeMiddlewareBefore, m.initializeMiddlewareAfter, m.finalizeMiddlewareAfter, m.deserializeMiddleware)
 }
